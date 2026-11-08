@@ -16,7 +16,15 @@ density = 480
 sources = ["vendor_boot", "vendor_dlkm", "vendor", "system_dlkm"]
 # The touchscreen: FocalTech's, over SPI behind Xiaomi's touch layer, the
 # one touch driver the phone's own modules.load lists.
-load = ["focaltech_touch_3683"]
+#
+# nxp-nci is what makes the secure element reachable at all: it is the
+# driver of the NFC controller, and it is what creates /dev/nq-nci, the node
+# the secure element's service opens. Without it that service finds no chip
+# and the weaver cannot reach its slots, so a screen lock never opens.
+# The phone's own modules.load lists it right after stm_nfc_i2c, which is
+# the driver of the other NFC controller of the same generation; loading it
+# alone is enough, and the two do not conflict when both are in.
+load = ["focaltech_touch_3683", "nxp-nci"]
 
 # As on the 17 Ultra, the controller comes back from its reset sending raw
 # frames for /odm/lib64/libtouchreport.so, which a recovery runs none of;
@@ -57,6 +65,161 @@ oneshot = true
 user = "root"
 groups = ["root", "system", "wakelock", "graphics"]
 
+# Each of the phone's own programs below runs as the user, in the groups
+# and with the capabilities its init script on the phone gives it.
+
+# The secure world reaches back into Android through the listeners this
+# daemon registers; without them the key service cannot use any key.
+[[service]]
+path = "/system/tee/qseecomd"
+libraries = ["/system/tee", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64", "/sbin", "/odm/lib64"]
+ready_property = "vendor.sys.listeners.registered"
+user = "root"
+groups = ["root", "drmrpc"]
+
+# The opener the secure world's apps are reached through by programs that
+# speak to them as GlobalPlatform's TEE client does, which loads those apps
+# from /vendor/firmware_mnt/image as they are first asked for.
+[[service]]
+path = "/system/tee/hlosminkdaemon"
+libraries = ["/system/tee", "/vendor/lib64", "/vendor/lib64/hw", "/system/lib64", "/sbin", "/odm/lib64"]
+user = "system"
+groups = ["system", "oem_2912", "wakelock"]
+capabilities = ["WAKE_ALARM", "BLOCK_SUSPEND"]
+
+# The key service, which is the only thing that can use the keys the phone
+# wrapped in hardware. This one program serves the secure clock and the
+# shared secret too, registering all of them, so only the key service is
+# waited for.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.security.onekeymint-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.security.keymint.IKeyMintDevice/default"
+registers = [
+    "android.hardware.security.keymint.IRemotelyProvisionedComponent/default",
+    "android.hardware.security.secureclock.ISecureClock/default",
+    "android.hardware.security.sharedsecret.ISharedSecret/default",
+]
+user = "system"
+groups = ["system", "drmrpc"]
+
+# The credential service: it is what the secure world has check the secret
+# behind a screen lock, and the only thing that can hand out the note the
+# key service wants before it will use a key that secret guards.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.gatekeeper-rust-service-qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.gatekeeper.IGatekeeper/default"
+user = "system"
+groups = ["system"]
+
+# A pause before the weaver, while the element's service settles. That
+# service registers the moment its program runs, but it can only name the
+# element after connecting to it, and a weaver that asks in that gap is
+# turned away. The wait costs a few seconds once and none after.
+[[service]]
+path = "/system/bin/sh"
+args = ["/system/tee/wait_omapi.sh"]
+oneshot = true
+user = "root"
+groups = ["root"]
+
+# The touchscreen, kept in the mode where its driver hands over what the
+# controller reports rather than what it makes of it. The phone's own
+# recovery writes this once and has the touch controller restart it after
+# the panel wakes, which leaves a screen that comes back on with no finger
+# reaching the page; writing it again every second costs nothing and covers
+# every such restart. This is what the phone's own recovery does, as a loop
+# of its own.
+[[service]]
+path = "/system/bin/sh"
+args = ["-c", "while true; do echo 0 > /sys/class/touch/touch_dev/enable_touch_raw 2>/dev/null; sleep 1; done"]
+user = "root"
+groups = ["root"]
+
+# The DMA-BUF heaps the secure element's service shares memory with the
+# secure world through, made as that service needs them they exist. Android's
+# own init makes these as the kernel announces them; a recovery runs no init,
+# so this makes them itself, with the numbers the driver gives them on this
+# phone. Without them the service cannot send the applet's image to the
+# secure world, and every load returns 23, "not authorized", which is what a
+# buffer that was never made looks like from the other side.
+[[service]]
+path = "/system/bin/sh"
+args = ["/system/tee/make_dma_heap.sh"]
+oneshot = true
+user = "root"
+groups = ["root"]
+libraries = ["/system/tee", "/vendor/lib64", "/system/lib64"]
+
+# The secure element's service, which what speaks to the element through
+# Android's OMAPI interface is reached by. NXP's weaver below is one of
+# them: it asks this program for the element rather than driving it. It is
+# started first, and the OMAPI service after it, before the weaver: the
+# order the phone's own recovery keeps, and the weaver links against the
+# OMAPI service, not against this one.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.secure_element-service.qti"
+# The element the weaver talks to is this phone's embedded one, which the
+# service registers as eSE1; SIM1 and SIM2 are the element inside a card,
+# and are only there with a card in. Waiting for SIM1 waits for something
+# that is never registered, so the wait times out and the services after
+# this one never start.
+ready_service = "android.hardware.secure_element.ISecureElement/eSE1"
+user = "root"
+groups = ["root", "nfc", "system"]
+
+# Android's own OMAPI service, which the weaver's ese_weaver.so asks for the
+# secure element through. It is a program of the recovery's own rather than
+# the phone's, and it is the service directory that the weaver's binder call
+# to android.se.omapi.ISecureElementService/default reaches.
+[[service]]
+path = "/system/bin/se_omapi"
+ready_service = "android.se.omapi.ISecureElementService/default"
+user = "root"
+groups = ["root"]
+
+# The weaver, in the secure element. On this phone it is NXP's; every
+# user's secret is bound to a slot of it, and the phone keeps the slot in
+# /data/system_de/0/spblob/<handle>.weaver, so a screen lock cannot be
+# opened without it.
+#
+# It runs as root, and finds its libraries in this order: on the phone's
+# own init it is a hal started before any account exists to drop to, and
+# ese_weaver.so drives the element through nodes only root may open. The
+# element's service is listed above it, and it is by that service that the
+# element is reached.
+[[service]]
+path = "/system/tee/weaver-service"
+# Only the recovery's own system folder: its OMAPI interface library is the
+# one se_omapi was built against, and the two have to be the same file, or
+# the call across them is refused as the wrong type and the weaver stops
+# before it reaches the element. Nothing else is named, so the rest of what
+# it loads comes from the folders its own program on the phone finds them in.
+libraries = ["/system/lib64"]
+# The one OMAPI library the two programs on either side of the element have
+# to share. Its program picks one up itself, and the vendor partition holds
+# an older build of it, so the name is given here: without this the call is
+# refused as the wrong type and the weaver stops before it reaches a slot.
+preload = ["/system/lib64/android.se.omapi-V1-ndk.so"]
+ready_service = "android.hardware.weaver.IWeaver/default"
+# Named rather than looked for. This phone's description of its weaver names
+# the interface and the instance in two tags of their own, and the recovery
+# only recognises one that writes them as one word with a slash between, so
+# that it never takes this file in and the directory never learns of it.
+description = "/odm/etc/vintf/manifest/android.hardware.weaver-service.nxp.xml"
+user = "root"
+groups = ["root", "system"]
+
+# The boot control, which says which slot the bootloader starts next and
+# switches it. It comes last: the phone is usable without it.
+[[service]]
+path = "/vendor/bin/hw/android.hardware.boot-service.qti"
+libraries = ["/system/lib64", "/vendor/lib64"]
+ready_service = "android.hardware.boot.IBootControl/default"
+user = "root"
+groups = ["root"]
+
 # WLAN: Qualcomm's Peach on PCIe (qcom,cnss-peach in its dtbo), as on the
 # 17 Ultra, whose vendor partition this phone shares file for file but for
 # its build properties, a power hint and two radio libraries.
@@ -73,13 +236,21 @@ probe = "http://connect.rom.miui.com/generate_204"
 [update]
 server = "https://update.miui.com/updates/miotaV3.php"
 
-# The stock build the recovery is made on: the Chinese system's OS4.0.4.0,
-# whose full update package on the phone maker's own download server holds
-# the recovery partition the recovery is built on top of.
+# The stock build the recovery is made on: the Chinese system's OS4.0.6.0,
+# the build the phone runs, whose recovery partition the recovery is built
+# on top of. The sum is of that partition as the maker ships it.
+#
+# The maker's own download server will not hand this package out without a
+# signed query on the link, and that signature is bound to a moment, so the
+# link below will have stopped working long before anybody reads this. It is
+# kept for the shape of it, not to be used. Take the build's own recovery.img
+# from wherever this phone's firmware is had — the maker's download page, a
+# mirror, or the phone itself — and check it against the sum, which does not
+# change.
 [stock]
-version = "OS4.0.4.0.XPMCNXM"
-package = "https://bkt-sgp-miui-ota-update-alisgp.oss-ap-southeast-1.aliyuncs.com/OS4.0.4.0.XPMCNXM/myron-ota_full-OS4.0.4.0.XPMCNXM-user-17.0-70d1c400a4.zip"
-recovery = "6e4170a336ffb5a6291bb422c660efb5d61f45a4315524848848cb650e0d4832"
+version = "OS4.0.6.0.XPMCNXM"
+package = "https://ultimateota.d.miui.com/OS4.0.6.0.XPMCNXM/myron-ota_full-OS4.0.6.0.XPMCNXM-user-17.0-66564d402b.zip?t=1794159004&s=e366c009960305cba390773b1ecf26f0"
+recovery = "49622932fb32ab623db336866734ad440a2e15af5f750ceb9b1d3d0f7fdabafc"
 
 # qcom-hv-haptics (qcom,hv-haptics in its dtbo), with the click made from
 # samples at the motor's resonant frequency as on the 17 Ultra. The
