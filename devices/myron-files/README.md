@@ -101,7 +101,8 @@ was never made looks like from the other side. The second holds the weaver's
 start until OMAPI answers — it registers the moment its program runs but can
 only name the element after connecting to it.
 
-`vendor/etc/ueventd.rc` is the recovery ramdisk's own. It is needed for its
+`vendor/etc/ueventd.rc` is out of TWRP's ramdisk, not the maker's recovery —
+the maker's has no `vendor/etc/ueventd.rc` at all. It is needed for its
 `/dev/dma_heap/qcom,*` line, which is what gives the element's service the
 shared memory it sends applet images through.
 
@@ -130,7 +131,7 @@ Either way, check it against the `recovery` sum, which does not change.
 ```sh
 mkdir -p extra/system/tee extra/system/lib64 extra/vendor/etc
 
-# from the stock recovery's ramdisk
+# from TWRP's ramdisk for this phone
 #   (mount or extract it; the paths are the ones inside the ramdisk)
 ...
 # from the running phone

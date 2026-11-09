@@ -93,9 +93,10 @@ cp make_dma_heap.sh wait_omapi.sh extra/system/tee/
 了，但要连上安全元件之后才能报出它的名字，在那个空档里来问的 weaver 会被
 拒绝然后退出。没有它，大约五次启动只有一次能成。
 
-`vendor/etc/ueventd.rc` 是官方 recovery 自带的。需要它是因为里面那行
-`/dev/dma_heap/qcom,*`，正是它让安全元件服务拿到发送 applet 镜像用的那块
-共享内存。
+`vendor/etc/ueventd.rc` 来自 TWRP 的 ramdisk，不是官方 recovery 的 —— 官方
+那个里根本没有 `vendor/etc/ueventd.rc`。需要它是因为 TWRP 那份里有
+`/dev/dma_heap/qcom,*` 这一行，正是它让安全元件服务拿到发送 applet 镜像用的
+那块共享内存。
 
 ## 官方 recovery 从哪来
 
@@ -120,7 +121,7 @@ recovery 分区的 SHA-256。**但 `package` 那个下载链接用不了** —�
 ```sh
 mkdir -p extra/system/tee extra/system/lib64 extra/vendor/etc
 
-# 从官方 recovery 的 ramdisk 里取（解开后按上面的路径找）
+# 从 TWRP 的 ramdisk 里取（解开后按上面的路径找）
 ...
 # 从运行中的手机取
 adb pull /vendor/lib64/libdmabufheap.so   extra/system/lib64/
